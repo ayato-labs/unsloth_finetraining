@@ -150,14 +150,13 @@ def check_gpu_availability() -> None:
 
 
 def load_model_and_tokenizer(trace_id: str):
-    """モデルとトークナイザを読み込み（SDPA / FlashAttention 構造を明示適用）"""
+    """モデルとトークナイザを読み込み"""
     with trace_context(trace_id, "load_model_and_tokenizer"):
         model, tokenizer = FastLanguageModel.from_pretrained(
             MODEL_ID,
             max_seq_length=MAX_SEQ_LENGTH,
             dtype=None,
             load_in_4bit=True,
-            attn_implementation="sdpa",  # PyTorch 組み込みの FlashAttention 高速カーネル (SDPA) を有効化
         )
         logger.info("model_loaded", model_id=MODEL_ID, max_seq_length=MAX_SEQ_LENGTH)
         return model, tokenizer
@@ -303,7 +302,7 @@ def determine_optimal_batch_size(model, tokenizer, dataset, trace_id: str, targe
 
 
 def build_training_args(num_steps: int, batch_size: int = 1, grad_accum_steps: int = 8):
-    """SFTConfig 構築"""
+    """SFTConfig 構築（Liger Kernel + Packing + Paged 8bit Optim による最大高速化）"""
     warmup_steps = max(1, int(0.03 * num_steps))
     return SFTConfig(
         output_dir=OUTPUT_DIR,
@@ -320,7 +319,9 @@ def build_training_args(num_steps: int, batch_size: int = 1, grad_accum_steps: i
         load_best_model_at_end=False,
         warmup_steps=warmup_steps,
         lr_scheduler_type="cosine",
-        optim="adamw_8bit",
+        optim="paged_adamw_8bit",
+        use_liger_kernel=True,
+        packing=True,
         report_to="none",
         remove_unused_columns=False,
         gradient_checkpointing=True,
