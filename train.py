@@ -14,8 +14,10 @@ VERSION = _pyproject["project"]["version"]
 
 # GC が活性化メモリを早期に解放し、ダブルバッファ用の空き VRAM(>512MB) を維持する
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.7"
-# ダブルバッファを無効化し、VRAM 逼迫時の逐次化・再試行による不安定化を避ける
+# ダブルバッファおよび勾配の CPU オフロードを完全に無効化し、GPU VRAM 内で完結させる
 os.environ["UNSLOTH_DISABLE_DOUBLE_BUFFER"] = "1"
+os.environ["UNSLOTH_ENABLE_OFFLOAD"] = "0"
+os.environ["UNSLOTH_OFFLOAD_GRADIENTS"] = "0"
 
 import subprocess
 import torch
@@ -29,7 +31,7 @@ from trl import SFTConfig, SFTTrainer
 MODEL_ID = "google/gemma-3-1b-it"
 DATA_PATH = "data/dataset.jsonl"
 OUTPUT_DIR = "gemma3-finetuned"
-MAX_SEQ_LENGTH = 2048
+MAX_SEQ_LENGTH = 1024
 
 
 def setup_logging() -> None:
@@ -148,13 +150,14 @@ def check_gpu_availability() -> None:
 
 
 def load_model_and_tokenizer(trace_id: str):
-    """モデルとトークナイザを読み込み"""
+    """モデルとトークナイザを読み込み（SDPA / FlashAttention 構造を明示適用）"""
     with trace_context(trace_id, "load_model_and_tokenizer"):
         model, tokenizer = FastLanguageModel.from_pretrained(
             MODEL_ID,
             max_seq_length=MAX_SEQ_LENGTH,
             dtype=None,
             load_in_4bit=True,
+            attn_implementation="sdpa",  # PyTorch 組み込みの FlashAttention 高速カーネル (SDPA) を有効化
         )
         logger.info("model_loaded", model_id=MODEL_ID, max_seq_length=MAX_SEQ_LENGTH)
         return model, tokenizer
@@ -181,7 +184,7 @@ def prepare_tokenizer(model, tokenizer, trace_id: str):
 
 
 def setup_peft_model(model, trace_id: str):
-    """PEFT/LoRA モデルの設定"""
+    """PEFT/LoRA モデルの設定（Gradient Checkpointing＋FlashAttention/SDPAによる活性化メモリ激減）"""
     with trace_context(trace_id, "setup_peft_model"):
         model = FastLanguageModel.get_peft_model(
             model,
@@ -190,8 +193,11 @@ def setup_peft_model(model, trace_id: str):
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             lora_dropout=0,
             bias="none",
-            use_gradient_checkpointing="unsloth",
+            use_gradient_checkpointing="unsloth",  # Attention中間状態を保存せず再計算(Recomputation)してVRAM激減
             random_state=42,
+            offload_embedding=False,
+            offload_gradient=False,
+            offload_optimizer=False,
         )
         model.print_trainable_parameters()
         logger.info("peft_model_ready")
@@ -222,6 +228,15 @@ def determine_optimal_batch_size(model, tokenizer, dataset, trace_id: str, targe
 
     with trace_context(trace_id, "determine_optimal_batch_size"):
         if not torch.cuda.is_available():
+            return 1, target_total_batch
+
+        from vram_estimator import detect_vram
+
+        vram_gb = detect_vram()
+        # VRAM 6GB 未満（4GB環境等）は実測計算を行わずに即座に bsz=1 を返却
+        # （Unsloth Fused Cross Entropy の内部 LRU キャッシュ破壊を防ぎ、本番領域を100%保全するため）
+        if vram_gb < 6.0:
+            logger.info("auto_batch_sizing", detected_vram_gb=vram_gb, calculated_bsz=1, grad_accum=target_total_batch, mode="fast_path_low_vram")
             return 1, target_total_batch
 
         total_vram_bytes = torch.cuda.get_device_properties(0).total_memory
@@ -256,11 +271,27 @@ def determine_optimal_batch_size(model, tokenizer, dataset, trace_id: str, targe
             gc.collect()
             torch.cuda.empty_cache()
 
+            from vram_estimator import detect_vram
+
+            vram_gb = detect_vram()
             avail_for_act = max(0, target_vram_bytes - base_alloc)
-            optimal_bsz = max(1, int(avail_for_act // act_per_sample))
+            calculated_bsz = max(1, int(avail_for_act // act_per_sample))
+
+            # 検出した VRAM 容量に合わせて動的に上限を判定（例: VRAM 6GB 未満なら bsz=1、8GB以上なら計算値そのまま）
+            if vram_gb < 6.0:
+                optimal_bsz = min(1, calculated_bsz)
+            else:
+                optimal_bsz = calculated_bsz
+
             optimal_grad_accum = max(1, target_total_batch // optimal_bsz)
 
-            logger.info("auto_batch_sizing", calculated_bsz=optimal_bsz, grad_accum=optimal_grad_accum, act_mb=round(act_per_sample / 1024**2, 1))
+            logger.info(
+                "auto_batch_sizing",
+                detected_vram_gb=vram_gb,
+                calculated_bsz=optimal_bsz,
+                grad_accum=optimal_grad_accum,
+                act_mb=round(act_per_sample / 1024**2, 1),
+            )
             return optimal_bsz, optimal_grad_accum
 
         except Exception as exc:
@@ -294,8 +325,9 @@ def build_training_args(num_steps: int, batch_size: int = 1, grad_accum_steps: i
         remove_unused_columns=False,
         gradient_checkpointing=True,
         max_grad_norm=0.3,
+        dataset_text_field="text",
         max_seq_length=MAX_SEQ_LENGTH,
-        dataset_num_proc=2,
+        dataset_num_proc=os.cpu_count() or 4,
     )
 
 
