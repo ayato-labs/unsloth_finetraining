@@ -1,6 +1,6 @@
 [project]
 name = "gemma4-fine-tuning"
-version = "0.2.0"
+version = "0.2.1"
 description = "Fine-tuning Gemma 3 1B with Unsloth + TRL on 4GB VRAM"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
     "wandb>=0.17.0",
     "unsloth>=2026.7.6",
     "loguru>=0.7.0",
+    "liger-kernel>=0.3.0",
 ]
 
 [build-system]

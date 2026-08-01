@@ -11,6 +11,9 @@
 logs/
 *.log
 
+# 一時前処理キャッシュ（自動消去対象）
+.cache_temp_datasets/
+
 # data
 data/
 

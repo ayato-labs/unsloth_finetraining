@@ -19,6 +19,11 @@ os.environ["UNSLOTH_DISABLE_DOUBLE_BUFFER"] = "1"
 os.environ["UNSLOTH_ENABLE_OFFLOAD"] = "0"
 os.environ["UNSLOTH_OFFLOAD_GRADIENTS"] = "0"
 
+# データセット前処理の一時ディスクキャッシュを自動管理・隔離
+TEMP_CACHE_DIR = os.path.abspath(".cache_temp_datasets")
+os.environ["HF_DATASETS_CACHE"] = TEMP_CACHE_DIR
+
+import shutil
 import subprocess
 import torch
 import psutil
@@ -328,12 +333,22 @@ def build_training_args(num_steps: int, batch_size: int = 1, grad_accum_steps: i
         max_grad_norm=0.3,
         dataset_text_field="text",
         max_seq_length=MAX_SEQ_LENGTH,
-        dataset_num_proc=os.cpu_count() or 4,
+        dataset_num_proc=2,
     )
 
 
 def formatting_func(example):
     return example["text"]
+
+
+def cleanup_temp_cache() -> None:
+    """学習終了・失敗時に一時データセットキャッシュ領域を全消去して自動整理整頓"""
+    if os.path.exists(TEMP_CACHE_DIR):
+        try:
+            shutil.rmtree(TEMP_CACHE_DIR, ignore_errors=True)
+            logger.info("temp_cache_cleaned", path=TEMP_CACHE_DIR)
+        except Exception as exc:
+            logger.warning(f"failed_to_clean_temp_cache: {exc}")
 
 
 def main() -> None:
@@ -383,6 +398,9 @@ def main() -> None:
     except Exception as exc:
         handle_failure("main", exc, trace_id)
         sys.exit(1)
+    finally:
+        # 学習完了または例外終了時、不要になった前処理キャッシュを全消去して自動クリーンアップ
+        cleanup_temp_cache()
 
     logger.info("training_complete", trace_id=trace_id)
 
