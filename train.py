@@ -34,6 +34,7 @@ MAX_SEQ_LENGTH = 2048
 
 def setup_logging() -> None:
     """ターミナルには色付きで見やすい表示、ファイルには構造化ログ（JSON）を出力"""
+    os.makedirs("logs", exist_ok=True)
     logger.remove()
     # デフォルトの extra フィールド（trace_id 未指定時用）
     logger.configure(extra={"trace_id": "system"})
@@ -215,14 +216,56 @@ def split_dataset_mmap(dataset, trace_id: str, eval_size: int = 500):
         return train_dataset, eval_dataset
 
 
-def build_training_args(num_steps: int):
+def determine_optimal_batch_size(model, tokenizer, trace_id: str, target_total_batch: int = 8) -> tuple[int, int]:
+    """実測値に基づいて VRAM に収まる最適な per_device_train_batch_size と gradient_accumulation_steps を自動計算"""
+    import gc
+
+    with trace_context(trace_id, "determine_optimal_batch_size"):
+        if not torch.cuda.is_available():
+            return 1, target_total_batch
+
+        total_vram_bytes = torch.cuda.get_device_properties(0).total_memory
+        target_vram_bytes = total_vram_bytes * 0.85
+
+        dummy_input = tokenizer("テスト" * 100, return_tensors="pt", max_length=MAX_SEQ_LENGTH, truncation=True).to("cuda")
+
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        try:
+            base_alloc = torch.cuda.memory_allocated()
+
+            out = model(**dummy_input, labels=dummy_input["input_ids"])
+            out.loss.backward()
+            peak_alloc = torch.cuda.max_memory_allocated()
+
+            act_per_sample = max(1024 * 1024, peak_alloc - base_alloc)
+
+            model.zero_grad()
+            del out, dummy_input
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            avail_for_act = max(0, target_vram_bytes - base_alloc)
+            optimal_bsz = max(1, int(avail_for_act // act_per_sample))
+            optimal_grad_accum = max(1, target_total_batch // optimal_bsz)
+
+            logger.info("auto_batch_sizing", calculated_bsz=optimal_bsz, grad_accum=optimal_grad_accum, act_mb=round(act_per_sample / 1024**2, 1))
+            return optimal_bsz, optimal_grad_accum
+
+        except Exception as exc:
+            handle_failure("determine_optimal_batch_size", exc, trace_id)
+            return 1, target_total_batch
+
+
+def build_training_args(num_steps: int, batch_size: int = 1, grad_accum_steps: int = 8):
     """SFTConfig 構築"""
     warmup_steps = max(1, int(0.03 * num_steps))
     return SFTConfig(
         output_dir=OUTPUT_DIR,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        gradient_accumulation_steps=8,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum_steps,
         num_train_epochs=1,
         learning_rate=2e-4,
         bf16=True,
@@ -239,7 +282,7 @@ def build_training_args(num_steps: int):
         gradient_checkpointing=True,
         max_grad_norm=0.3,
         max_seq_length=MAX_SEQ_LENGTH,
-        dataset_num_proc=1,
+        dataset_num_proc=os.cpu_count() or 4,
     )
 
 
@@ -266,14 +309,17 @@ def main() -> None:
         dataset = load_dataset_mmap(trace_id)
         train_dataset, eval_dataset = split_dataset_mmap(dataset, trace_id, eval_size=500)
 
-        num_steps = math.ceil(len(train_dataset) / (1 * 8))
-        training_args = build_training_args(num_steps)
+        batch_size, grad_accum = determine_optimal_batch_size(model, tokenizer, trace_id, target_total_batch=8)
+
+        num_steps = math.ceil(len(train_dataset) / (batch_size * grad_accum))
+        training_args = build_training_args(num_steps, batch_size=batch_size, grad_accum_steps=grad_accum)
 
         trainer = SFTTrainer(
             model=model,
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
+            dataset_num_proc=training_args.dataset_num_proc,
             formatting_func=formatting_func,
             processing_class=tokenizer,
             data_collator=None,
