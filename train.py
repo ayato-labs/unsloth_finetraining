@@ -216,8 +216,8 @@ def split_dataset_mmap(dataset, trace_id: str, eval_size: int = 500):
         return train_dataset, eval_dataset
 
 
-def determine_optimal_batch_size(model, tokenizer, trace_id: str, target_total_batch: int = 8) -> tuple[int, int]:
-    """実測値に基づいて VRAM に収まる最適な per_device_train_batch_size と gradient_accumulation_steps を自動計算"""
+def determine_optimal_batch_size(model, tokenizer, dataset, trace_id: str, target_total_batch: int = 8) -> tuple[int, int]:
+    """実際の学習データ（MAX_SEQ_LENGTH長）の実測値に基づいて VRAM に収まる最適な batch_size と gradient_accumulation_steps を自動計算"""
     import gc
 
     with trace_context(trace_id, "determine_optimal_batch_size"):
@@ -227,7 +227,15 @@ def determine_optimal_batch_size(model, tokenizer, trace_id: str, target_total_b
         total_vram_bytes = torch.cuda.get_device_properties(0).total_memory
         target_vram_bytes = total_vram_bytes * 0.85
 
-        dummy_input = tokenizer("テスト" * 100, return_tensors="pt", max_length=MAX_SEQ_LENGTH, truncation=True).to("cuda")
+        # 実際の学習データから1件取得し、MAX_SEQ_LENGTH までパディングして最悪ケース（最大長）のメモリをシミュレーション
+        sample_text = dataset[0]["text"]
+        sample_input = tokenizer(
+            sample_text,
+            return_tensors="pt",
+            max_length=MAX_SEQ_LENGTH,
+            padding="max_length",
+            truncation=True,
+        ).to("cuda")
 
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -235,14 +243,16 @@ def determine_optimal_batch_size(model, tokenizer, trace_id: str, target_total_b
         try:
             base_alloc = torch.cuda.memory_allocated()
 
-            out = model(**dummy_input, labels=dummy_input["input_ids"])
-            out.loss.backward()
+            out = model(**sample_input, labels=sample_input["input_ids"])
+            loss = out.loss
+            loss.backward()
             peak_alloc = torch.cuda.max_memory_allocated()
 
             act_per_sample = max(1024 * 1024, peak_alloc - base_alloc)
 
-            model.zero_grad()
-            del out, dummy_input
+            # メモリの徹底解放（計算グラフ・勾配・テンソルの消去）
+            model.zero_grad(set_to_none=True)
+            del out, loss, sample_input
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -254,6 +264,9 @@ def determine_optimal_batch_size(model, tokenizer, trace_id: str, target_total_b
             return optimal_bsz, optimal_grad_accum
 
         except Exception as exc:
+            model.zero_grad(set_to_none=True)
+            gc.collect()
+            torch.cuda.empty_cache()
             handle_failure("determine_optimal_batch_size", exc, trace_id)
             return 1, target_total_batch
 
@@ -282,7 +295,7 @@ def build_training_args(num_steps: int, batch_size: int = 1, grad_accum_steps: i
         gradient_checkpointing=True,
         max_grad_norm=0.3,
         max_seq_length=MAX_SEQ_LENGTH,
-        dataset_num_proc=os.cpu_count() or 4,
+        dataset_num_proc=2,
     )
 
 
@@ -309,7 +322,7 @@ def main() -> None:
         dataset = load_dataset_mmap(trace_id)
         train_dataset, eval_dataset = split_dataset_mmap(dataset, trace_id, eval_size=500)
 
-        batch_size, grad_accum = determine_optimal_batch_size(model, tokenizer, trace_id, target_total_batch=8)
+        batch_size, grad_accum = determine_optimal_batch_size(model, tokenizer, train_dataset, trace_id, target_total_batch=8)
 
         num_steps = math.ceil(len(train_dataset) / (batch_size * grad_accum))
         training_args = build_training_args(num_steps, batch_size=batch_size, grad_accum_steps=grad_accum)
