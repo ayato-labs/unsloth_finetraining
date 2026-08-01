@@ -1,0 +1,97 @@
+# ==========================================
+# uv / Virtual Environment
+# ==========================================
+# uv が作成するローカルの仮想環境ディレクトリ
+.venv/
+
+# uv のローカルキャッシュ（通常はグローバルに保存されますが、プロジェクト内に生成された場合用）
+.uv/
+
+# ログ
+logs/
+*.log
+
+# data
+data/
+
+# ==========================================
+# Python Common
+# ==========================================
+# バイトコード。コンパイル済みファイル
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+
+# C拡張モジュール
+*.so
+
+# 配布・パッケージング関連
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
+# 環境変数ファイル（認証情報や秘密鍵を含むため絶対にコミットしない）
+.env
+.env.[a-zA-Z]*
+!.env.example
+
+# ==========================================
+# Testing / Coverage / Linting
+# ==========================================
+# インラインスナップショットやテスト一時ファイル
+.inline-snapshot/
+.cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+XSLTFilehtmlcov/
+.spyproject
+.spyderproject
+
+# ==========================================
+# IDEs / Editors
+# ==========================================
+# Visual Studio Code
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# JetBrains (PyCharm, IntelliJ, etc.)
+.idea/
+
+# その他のエディタ
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

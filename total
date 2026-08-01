@@ -1,0 +1,5 @@
+model.vision_tower -> cpu
+model.language_model -> cpu
+model.language_model.embed_tokens -> cpu
+model.language_model.embed_tokens_per_layer -> cpu
+model.audio_tower -> cpu
