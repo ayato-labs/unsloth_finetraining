@@ -1,37 +1,30 @@
 import math
 import os
 import sys
-import traceback
 import tomllib
 import uuid
+import shutil
+import subprocess
 from contextlib import contextmanager
-from functools import wraps
+import torch
+import psutil
+from loguru import logger
+from unsloth import FastLanguageModel
+from datasets import load_dataset
+from transformers import TrainerCallback
+from trl import SFTConfig, SFTTrainer
 
 # バージョンを pyproject.toml から読み取り
 with open("pyproject.toml", "rb") as f:
     _pyproject = tomllib.load(f)
 VERSION = _pyproject["project"]["version"]
 
-# GC が活性化メモリを早期に解放し、ダブルバッファ用の空き VRAM(>512MB) を維持する
+# 活性化メモリの早期解放
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.7"
-# ダブルバッファおよび勾配の CPU オフロードを完全に無効化し、GPU VRAM 内で完結させる
-os.environ["UNSLOTH_DISABLE_DOUBLE_BUFFER"] = "1"
-os.environ["UNSLOTH_ENABLE_OFFLOAD"] = "0"
-os.environ["UNSLOTH_OFFLOAD_GRADIENTS"] = "0"
 
 # データセット前処理の一時ディスクキャッシュを自動管理・隔離
 TEMP_CACHE_DIR = os.path.abspath(".cache_temp_datasets")
 os.environ["HF_DATASETS_CACHE"] = TEMP_CACHE_DIR
-
-import shutil
-import subprocess
-import torch
-import psutil
-from loguru import logger
-from unsloth import FastLanguageModel
-from datasets import Dataset, load_dataset
-from transformers import TrainerCallback
-from trl import SFTConfig, SFTTrainer
 
 MODEL_ID = "google/gemma-3-1b-it"
 DATA_PATH = "data/dataset.jsonl"
@@ -43,10 +36,8 @@ def setup_logging() -> None:
     """ターミナルには色付きで見やすい表示、ファイルには構造化ログ（JSON）を出力"""
     os.makedirs("logs", exist_ok=True)
     logger.remove()
-    # デフォルトの extra フィールド（trace_id 未指定時用）
     logger.configure(extra={"trace_id": "system"})
 
-    # ターミナル（標準出力）: 人間が見やすいフォーマット（色付き、trace_id表示）
     console_format = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | "
@@ -62,7 +53,6 @@ def setup_logging() -> None:
         backtrace=True,
         diagnose=True,
     )
-    # ファイル出力: 検索・分析用の構造化 JSON 形式
     logger.add(
         "logs/train_{time:YYYYMMDD}.log",
         format="{message}",
@@ -81,10 +71,9 @@ def generate_trace_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-
 @contextmanager
 def trace_context(trace_id: str, operation: str):
-    """処理単位のコンテキスト管理（trace_id と操作名を付与）"""
+    """処理単位のコンテキスト管理"""
     with logger.contextualize(trace_id=trace_id, operation=operation):
         logger.info("start")
         try:
@@ -96,14 +85,14 @@ def trace_context(trace_id: str, operation: str):
 
 
 def handle_failure(operation: str, exc: Exception, trace_id: str, **context) -> None:
-    """統一例外処理: コンテキストとスタックトレースを構造化出力"""
+    """統一例外処理"""
     logger.bind(trace_id=trace_id, operation=operation, **context).exception(
         f"failure in {operation}: {type(exc).__name__}: {exc}"
     )
 
 
 def get_gpu_telemetry() -> str:
-    """nvidia-smi から温度・SMクロック・消費電力・VRAM使用量を取得"""
+    """nvidia-smi から GPU メトリクスを取得"""
     try:
         out = subprocess.run(
             [
@@ -122,8 +111,7 @@ def get_gpu_telemetry() -> str:
 
 
 class TelemetryCallback(TrainerCallback):
-    """一定ステップごとに VRAM / システムRAM / GPU温度・クロックを出力し、
-    スローダウンの原因（サーマルスロットリング or メモリ逼迫）を特定する。"""
+    """VRAM / RAM / GPU 状態をログ出力"""
 
     def __init__(self, interval: int = 10):
         self.interval = interval
@@ -155,7 +143,7 @@ def check_gpu_availability() -> None:
 
 
 def load_model_and_tokenizer(trace_id: str):
-    """モデルとトークナイザを読み込み"""
+    """モデルとトークナイザを読み込み（Unsloth ネイティブロード）"""
     with trace_context(trace_id, "load_model_and_tokenizer"):
         model, tokenizer = FastLanguageModel.from_pretrained(
             MODEL_ID,
@@ -188,7 +176,7 @@ def prepare_tokenizer(model, tokenizer, trace_id: str):
 
 
 def setup_peft_model(model, trace_id: str):
-    """PEFT/LoRA モデルの設定（Gradient Checkpointing＋FlashAttention/SDPAによる活性化メモリ激減）"""
+    """PEFT/LoRA モデルの設定（Unsloth 最適化 Gradient Checkpointing 適用）"""
     with trace_context(trace_id, "setup_peft_model"):
         model = FastLanguageModel.get_peft_model(
             model,
@@ -197,11 +185,8 @@ def setup_peft_model(model, trace_id: str):
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             lora_dropout=0,
             bias="none",
-            use_gradient_checkpointing="unsloth",  # Attention中間状態を保存せず再計算(Recomputation)してVRAM激減
+            use_gradient_checkpointing="unsloth",
             random_state=42,
-            offload_embedding=False,
-            offload_gradient=False,
-            offload_optimizer=False,
         )
         model.print_trainable_parameters()
         logger.info("peft_model_ready")
@@ -209,7 +194,7 @@ def setup_peft_model(model, trace_id: str):
 
 
 def load_dataset_mmap(trace_id: str):
-    """Memory-mapped Arrow データセットとして読み込み（RAM消費最小化 & Unsloth 完全対応）"""
+    """Memory-mapped Arrow データセットとして読み込み"""
     with trace_context(trace_id, "load_dataset_mmap"):
         dataset = load_dataset("json", data_files=DATA_PATH, split="train")
         logger.info("dataset_mmap_ready", total_samples=len(dataset))
@@ -217,7 +202,7 @@ def load_dataset_mmap(trace_id: str):
 
 
 def split_dataset_mmap(dataset, trace_id: str, eval_size: int = 500):
-    """Memory-mapped dataset の train/eval 分割"""
+    """train/eval 分割"""
     with trace_context(trace_id, "split_dataset_mmap"):
         train_size = len(dataset) - eval_size
         train_dataset = dataset.select(range(train_size))
@@ -226,94 +211,13 @@ def split_dataset_mmap(dataset, trace_id: str, eval_size: int = 500):
         return train_dataset, eval_dataset
 
 
-def determine_optimal_batch_size(model, tokenizer, dataset, trace_id: str, target_total_batch: int = 8) -> tuple[int, int]:
-    """実際の学習データ（MAX_SEQ_LENGTH長）の実測値に基づいて VRAM に収まる最適な batch_size と gradient_accumulation_steps を自動計算"""
-    import gc
-
-    with trace_context(trace_id, "determine_optimal_batch_size"):
-        if not torch.cuda.is_available():
-            return 1, target_total_batch
-
-        from vram_estimator import detect_vram
-
-        vram_gb = detect_vram()
-        # VRAM 6GB 未満（4GB環境等）は実測計算を行わずに即座に bsz=1 を返却
-        # （Unsloth Fused Cross Entropy の内部 LRU キャッシュ破壊を防ぎ、本番領域を100%保全するため）
-        if vram_gb < 6.0:
-            logger.info("auto_batch_sizing", detected_vram_gb=vram_gb, calculated_bsz=1, grad_accum=target_total_batch, mode="fast_path_low_vram")
-            return 1, target_total_batch
-
-        total_vram_bytes = torch.cuda.get_device_properties(0).total_memory
-        target_vram_bytes = total_vram_bytes * 0.85
-
-        # 実際の学習データから1件取得し、MAX_SEQ_LENGTH までパディングして最悪ケース（最大長）のメモリをシミュレーション
-        sample_text = dataset[0]["text"]
-        sample_input = tokenizer(
-            sample_text,
-            return_tensors="pt",
-            max_length=MAX_SEQ_LENGTH,
-            padding="max_length",
-            truncation=True,
-        ).to("cuda")
-
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
-        try:
-            base_alloc = torch.cuda.memory_allocated()
-
-            out = model(**sample_input, labels=sample_input["input_ids"])
-            loss = out.loss
-            loss.backward()
-            peak_alloc = torch.cuda.max_memory_allocated()
-
-            act_per_sample = max(1024 * 1024, peak_alloc - base_alloc)
-
-            # メモリの徹底解放（計算グラフ・勾配・テンソルの消去）
-            model.zero_grad(set_to_none=True)
-            del out, loss, sample_input
-            gc.collect()
-            torch.cuda.empty_cache()
-
-            from vram_estimator import detect_vram
-
-            vram_gb = detect_vram()
-            avail_for_act = max(0, target_vram_bytes - base_alloc)
-            calculated_bsz = max(1, int(avail_for_act // act_per_sample))
-
-            # 検出した VRAM 容量に合わせて動的に上限を判定（例: VRAM 6GB 未満なら bsz=1、8GB以上なら計算値そのまま）
-            if vram_gb < 6.0:
-                optimal_bsz = min(1, calculated_bsz)
-            else:
-                optimal_bsz = calculated_bsz
-
-            optimal_grad_accum = max(1, target_total_batch // optimal_bsz)
-
-            logger.info(
-                "auto_batch_sizing",
-                detected_vram_gb=vram_gb,
-                calculated_bsz=optimal_bsz,
-                grad_accum=optimal_grad_accum,
-                act_mb=round(act_per_sample / 1024**2, 1),
-            )
-            return optimal_bsz, optimal_grad_accum
-
-        except Exception as exc:
-            model.zero_grad(set_to_none=True)
-            gc.collect()
-            torch.cuda.empty_cache()
-            handle_failure("determine_optimal_batch_size", exc, trace_id)
-            return 1, target_total_batch
-
-
-def build_training_args(num_steps: int, batch_size: int = 1, grad_accum_steps: int = 8):
-    """SFTConfig 構築（Liger Kernel + Packing + Paged 8bit Optim による最大高速化）"""
-    warmup_steps = max(1, int(0.03 * num_steps))
+def build_training_args():
+    """SFTConfig 構築（Unsloth ネイティブ設定）"""
     return SFTConfig(
         output_dir=OUTPUT_DIR,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
-        gradient_accumulation_steps=grad_accum_steps,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=8,
         num_train_epochs=1,
         learning_rate=2e-4,
         bf16=True,
@@ -322,27 +226,21 @@ def build_training_args(num_steps: int, batch_size: int = 1, grad_accum_steps: i
         save_steps=200,
         save_total_limit=2,
         load_best_model_at_end=False,
-        warmup_steps=warmup_steps,
+        warmup_ratio=0.03,
         lr_scheduler_type="cosine",
-        optim="paged_adamw_8bit",
-        use_liger_kernel=True,
-        packing=True,
+        optim="adamw_8bit",
         report_to="none",
         remove_unused_columns=False,
         gradient_checkpointing=True,
         max_grad_norm=0.3,
         dataset_text_field="text",
         max_seq_length=MAX_SEQ_LENGTH,
-        dataset_num_proc=2,
+        dataset_num_proc=os.cpu_count() or 4,
     )
 
 
-def formatting_func(example):
-    return example["text"]
-
-
 def cleanup_temp_cache() -> None:
-    """学習終了・失敗時に一時データセットキャッシュ領域を全消去して自動整理整頓"""
+    """学習終了・失敗時に一時データセットキャッシュ領域を全消去」"""
     if os.path.exists(TEMP_CACHE_DIR):
         try:
             shutil.rmtree(TEMP_CACHE_DIR, ignore_errors=True)
@@ -370,10 +268,7 @@ def main() -> None:
         dataset = load_dataset_mmap(trace_id)
         train_dataset, eval_dataset = split_dataset_mmap(dataset, trace_id, eval_size=500)
 
-        batch_size, grad_accum = determine_optimal_batch_size(model, tokenizer, train_dataset, trace_id, target_total_batch=8)
-
-        num_steps = math.ceil(len(train_dataset) / (batch_size * grad_accum))
-        training_args = build_training_args(num_steps, batch_size=batch_size, grad_accum_steps=grad_accum)
+        training_args = build_training_args()
 
         trainer = SFTTrainer(
             model=model,
@@ -381,9 +276,7 @@ def main() -> None:
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             dataset_num_proc=training_args.dataset_num_proc,
-            formatting_func=formatting_func,
             processing_class=tokenizer,
-            data_collator=None,
             callbacks=[TelemetryCallback(interval=20)],
         )
 
@@ -399,7 +292,6 @@ def main() -> None:
         handle_failure("main", exc, trace_id)
         sys.exit(1)
     finally:
-        # 学習完了または例外終了時、不要になった前処理キャッシュを全消去して自動クリーンアップ
         cleanup_temp_cache()
 
     logger.info("training_complete", trace_id=trace_id)

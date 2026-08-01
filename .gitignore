@@ -19,6 +19,7 @@ data/
 
 # dev
 unsloth_compiled_cache/
+gemma3-finetuned/
 
 # ==========================================
 # Python Common
