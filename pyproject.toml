@@ -15,11 +15,15 @@ dependencies = [
     "safetensors>=0.4.5",
     "wandb>=0.17.0",
     "unsloth>=2026.7.6",
+    "loguru>=0.7.0",
 ]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+exclude = ["data*", "unsloth_compiled_cache*", "*.pyc", "__pycache__*"]
 
 [dependency-groups]
 dev = [
