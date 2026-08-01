@@ -197,38 +197,37 @@ def setup_peft_model(model, trace_id: str):
         return model
 
 
-def load_dataset_streaming(trace_id: str):
-    """学習データをストリーミング（IterableDataset）で読み込み（メモリ消費最小化）"""
-    with trace_context(trace_id, "load_dataset_streaming"):
-        stream = load_dataset("json", data_files=DATA_PATH, split="train", streaming=True)
-        stream = stream.shuffle(seed=42, buffer_size=1000)
-        logger.info("dataset_stream_ready")
-        return stream
+def load_dataset_mmap(trace_id: str):
+    """Memory-mapped Arrow データセットとして読み込み（RAM消費最小化 & Unsloth 完全対応）"""
+    with trace_context(trace_id, "load_dataset_mmap"):
+        dataset = load_dataset("json", data_files=DATA_PATH, split="train")
+        logger.info("dataset_mmap_ready", total_samples=len(dataset))
+        return dataset
 
 
-def split_dataset_streaming(stream_dataset, trace_id: str, eval_size: int = 500):
-    """take() / skip() によるストリーミング分割"""
-    with trace_context(trace_id, "split_dataset_streaming"):
-        eval_dataset = stream_dataset.take(eval_size)
-        train_dataset = stream_dataset.skip(eval_size)
-        logger.info("dataset_split_streaming", eval_samples=eval_size)
+def split_dataset_mmap(dataset, trace_id: str, eval_size: int = 500):
+    """Memory-mapped dataset の train/eval 分割"""
+    with trace_context(trace_id, "split_dataset_mmap"):
+        train_size = len(dataset) - eval_size
+        train_dataset = dataset.select(range(train_size))
+        eval_dataset = dataset.select(range(train_size, len(dataset)))
+        logger.info("dataset_split", train_samples=len(train_dataset), eval_samples=len(eval_dataset))
         return train_dataset, eval_dataset
 
 
-def build_training_args(max_steps: int = 1000):
-    """SFTConfig 構築（ストリーミング時は max_steps を指定）"""
-    warmup_steps = max(1, int(0.03 * max_steps))
+def build_training_args(num_steps: int):
+    """SFTConfig 構築"""
+    warmup_steps = max(1, int(0.03 * num_steps))
     return SFTConfig(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
-        max_steps=max_steps,
+        num_train_epochs=1,
         learning_rate=2e-4,
         bf16=True,
         logging_steps=10,
-        eval_strategy="steps",
-        eval_steps=200,
+        eval_strategy="epoch",
         save_steps=200,
         save_total_limit=2,
         load_best_model_at_end=False,
@@ -264,11 +263,11 @@ def main() -> None:
         model, tokenizer = prepare_tokenizer(model, tokenizer, trace_id)
         model = setup_peft_model(model, trace_id)
 
-        stream_dataset = load_dataset_streaming(trace_id)
-        train_dataset, eval_dataset = split_dataset_streaming(stream_dataset, trace_id, eval_size=500)
+        dataset = load_dataset_mmap(trace_id)
+        train_dataset, eval_dataset = split_dataset_mmap(dataset, trace_id, eval_size=500)
 
-        # ストリーミング時は max_steps を指定して最適化
-        training_args = build_training_args(max_steps=1000)
+        num_steps = math.ceil(len(train_dataset) / (1 * 8))
+        training_args = build_training_args(num_steps)
 
         trainer = SFTTrainer(
             model=model,
