@@ -43,8 +43,7 @@ MAX_SEQ_LENGTH = 1024
 
 # ETA 算出ウィンドウ設定（HF Trainer の進捗バーに適用）
 ETA_WINDOW_FRACTION = 0.05  # 直近 n% の Step から ETA を計算（ここでは 5%）
-ETA_USE_MEDIAN = True       # True: 中央値（外れ値に強い）/ False: 平均値
-
+ETA_USE_MEDIAN = False      # False: 平均値（期待完了時刻の不偏推定量）/ True: 中央値（外れ値に強い）
 
 class RecentWindowTqdm(_base_tqdm):
     """直近 ETA_WINDOW_FRACTION % の Step 時間から rate を算出する tqdm。
@@ -57,6 +56,10 @@ class RecentWindowTqdm(_base_tqdm):
     def __init__(self, *args, **kwargs):
         self._step_times: deque[float] = deque()
         self._last_update_at: float | None = None
+        # 解釈終了時（__del__ 経由の display）にモジュールグローバルが None 化されても
+        # 壊れないよう、統計関数をインスタンス属性として束縛しておく
+        self._median = statistics.median
+        self._mean = statistics.mean
         super().__init__(*args, **kwargs)
 
     def update(self, n=1):
@@ -75,7 +78,7 @@ class RecentWindowTqdm(_base_tqdm):
     def format_dict(self):
         d = super().format_dict
         if self._step_times:
-            recent = statistics.median(self._step_times) if ETA_USE_MEDIAN else statistics.mean(self._step_times)
+            recent = self._median(self._step_times) if ETA_USE_MEDIAN else self._mean(self._step_times)
             if recent > 0:
                 d["rate"] = 1.0 / recent
         return d
