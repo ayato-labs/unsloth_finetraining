@@ -5,6 +5,8 @@ import tomllib
 import uuid
 import shutil
 import subprocess
+import statistics
+from collections import deque
 from contextlib import contextmanager
 import torch
 import psutil
@@ -13,6 +15,7 @@ from unsloth import FastLanguageModel
 from datasets import load_dataset
 from transformers import TrainerCallback
 from trl import SFTConfig, SFTTrainer
+from tqdm.auto import tqdm as _base_tqdm
 
 # バージョンを pyproject.toml から読み取り
 with open("pyproject.toml", "rb") as f:
@@ -37,6 +40,53 @@ MODEL_ID = "google/gemma-3-1b-it"
 DATA_PATH = "data/dataset.jsonl"
 OUTPUT_DIR = "gemma3-finetuned"
 MAX_SEQ_LENGTH = 1024
+
+# ETA 算出ウィンドウ設定（HF Trainer の進捗バーに適用）
+ETA_WINDOW_FRACTION = 0.05  # 直近 n% の Step から ETA を計算（ここでは 5%）
+ETA_USE_MEDIAN = True       # True: 中央値（外れ値に強い）/ False: 平均値
+
+
+class RecentWindowTqdm(_base_tqdm):
+    """直近 ETA_WINDOW_FRACTION % の Step 時間から rate を算出する tqdm。
+
+    tqdm 標準の ETA は全 Step の平均（EMA）に基づくため、遅い序盤の Step や
+    一時的な遅延に引きずられる。本クラスは update() ごとの実測時間をリング
+    バッファに保持し、直近 n% の平均値または中央値から ETA を再計算する。
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._step_times: deque[float] = deque()
+        self._last_update_at: float | None = None
+        super().__init__(*args, **kwargs)
+
+    def update(self, n=1):
+        now = self._time()
+        if self._last_update_at is not None and self.n > self.initial:
+            dt = now - self._last_update_at
+            if dt > 0:
+                window = max(1, int(self.total * ETA_WINDOW_FRACTION)) if self.total else 100
+                self._step_times.append(dt / max(n, 1))
+                while len(self._step_times) > window:
+                    self._step_times.popleft()
+        self._last_update_at = now
+        return super().update(n)
+
+    @property
+    def format_dict(self):
+        d = super().format_dict
+        if self._step_times:
+            recent = statistics.median(self._step_times) if ETA_USE_MEDIAN else statistics.mean(self._step_times)
+            if recent > 0:
+                d["rate"] = 1.0 / recent
+        return d
+
+
+def patch_progress_bar() -> None:
+    """HF Trainer の ProgressCallback が使う tqdm を RecentWindowTqdm に差し替え"""
+    import transformers.trainer_callback as trainer_callback
+
+    trainer_callback.tqdm = RecentWindowTqdm
+    logger.info("progress_bar_patched", window_fraction=ETA_WINDOW_FRACTION, use_median=ETA_USE_MEDIAN)
 
 
 def setup_logging() -> None:
@@ -283,6 +333,8 @@ def main() -> None:
         train_dataset, eval_dataset = split_dataset_mmap(dataset, trace_id, eval_size=500)
 
         training_args = build_training_args()
+
+        patch_progress_bar()
 
         trainer = SFTTrainer(
             model=model,
