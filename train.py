@@ -281,7 +281,20 @@ def main() -> None:
         )
 
         with trace_context(trace_id, "training"):
-            trainer.train()
+            # チェックポイントの検索（途中中断からの自動復帰機能）
+            checkpoint = None
+            if os.path.exists(OUTPUT_DIR):
+                checkpoints = [
+                    os.path.join(OUTPUT_DIR, d)
+                    for d in os.listdir(OUTPUT_DIR)
+                    if d.startswith("checkpoint-") and os.path.isdir(os.path.join(OUTPUT_DIR, d))
+                ]
+                if checkpoints:
+                    # ステップ数が最も大きい最新のチェックポイントを選択
+                    checkpoint = max(checkpoints, key=lambda x: int(x.split("-")[-1]))
+                    logger.info("resuming_from_checkpoint", checkpoint=checkpoint)
+
+            trainer.train(resume_from_checkpoint=checkpoint)
 
         with trace_context(trace_id, "save_model"):
             model.save_pretrained(OUTPUT_DIR)
