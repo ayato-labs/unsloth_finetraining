@@ -19,8 +19,15 @@ with open("pyproject.toml", "rb") as f:
     _pyproject = tomllib.load(f)
 VERSION = _pyproject["project"]["version"]
 
-# 活性化メモリの早期解放
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.7"
+# VRAM アロケータ最適化:
+#   expandable_segments  - 固定ブロック方式ではなく伸縮セグメントで断片化を根本抑制
+#   garbage_collection_threshold - 使用率 70% で GC 発動し空き領域を早期確保
+#   max_split_size_mb    - 256MB 以上のブロックを分割禁止し、大きな連続空き領域を維持
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+    "expandable_segments:True,"
+    "garbage_collection_threshold:0.7,"
+    "max_split_size_mb:256"
+)
 
 # データセット前処理の一時ディスクキャッシュを自動管理・隔離
 TEMP_CACHE_DIR = os.path.abspath(".cache_temp_datasets")
@@ -111,14 +118,21 @@ def get_gpu_telemetry() -> str:
 
 
 class TelemetryCallback(TrainerCallback):
-    """VRAM / RAM / GPU 状態をログ出力"""
+    """VRAM / RAM / GPU 状態をログ出力 + 定期 VRAM デフラグ"""
 
-    def __init__(self, interval: int = 10):
+    def __init__(self, interval: int = 10, defrag_interval: int = 500):
         self.interval = interval
+        self.defrag_interval = defrag_interval
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if state.global_step % self.interval != 0:
             return
+
+        # 長時間稼働時の VRAM 断片化を定期的に解消（500 step ごと）
+        if state.global_step > 0 and state.global_step % self.defrag_interval == 0:
+            torch.cuda.empty_cache()
+            logger.info("vram_defrag", step=state.global_step)
+
         vram_free_mib = torch.cuda.mem_get_info(0)[0] / 1024**2
         vram_total_mib = torch.cuda.mem_get_info(0)[1] / 1024**2
         ram = psutil.virtual_memory()
