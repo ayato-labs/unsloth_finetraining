@@ -1,6 +1,6 @@
 [project]
 name = "gemma4-fine-tuning"
-version = "0.2.2"
+version = "0.3.0"
 description = "Fine-tuning Gemma 3 1B with Unsloth + TRL on 4GB VRAM"
 requires-python = ">=3.10"
 dependencies = [

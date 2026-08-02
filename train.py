@@ -22,42 +22,29 @@ with open("pyproject.toml", "rb") as f:
     _pyproject = tomllib.load(f)
 VERSION = _pyproject["project"]["version"]
 
-# VRAM アロケータ最適化:
-#   expandable_segments  - 固定ブロック方式ではなく伸縮セグメントで断片化を根本抑制
-#   garbage_collection_threshold - 使用率 70% で GC 発動し空き領域を早期確保
-#   max_split_size_mb    - 256MB 以上のブロックを分割禁止し、大きな連続空き領域を維持
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
     "expandable_segments:True,"
     "garbage_collection_threshold:0.7,"
     "max_split_size_mb:256"
 )
 
-# データセット前処理の一時ディスクキャッシュを自動管理・隔離
 TEMP_CACHE_DIR = os.path.abspath(".cache_temp_datasets")
 os.environ["HF_DATASETS_CACHE"] = TEMP_CACHE_DIR
 
 MODEL_ID = "google/gemma-3-1b-it"
 DATA_PATH = "data/dataset.jsonl"
 OUTPUT_DIR = "gemma3-finetuned"
+MERGED_OUTPUT_DIR = "gemma3-merged"
 MAX_SEQ_LENGTH = 1024
 
-# ETA 算出ウィンドウ設定（HF Trainer の進捗バーに適用）
-ETA_WINDOW_FRACTION = 0.05  # 直近 n% の Step から ETA を計算（ここでは 5%）
-ETA_USE_MEDIAN = False      # False: 平均値（期待完了時刻の不偏推定量）/ True: 中央値（外れ値に強い）
+ETA_WINDOW_FRACTION = 0.05
+ETA_USE_MEDIAN = False
+
 
 class RecentWindowTqdm(_base_tqdm):
-    """直近 ETA_WINDOW_FRACTION % の Step 時間から rate を算出する tqdm。
-
-    tqdm 標準の ETA は全 Step の平均（EMA）に基づくため、遅い序盤の Step や
-    一時的な遅延に引きずられる。本クラスは update() ごとの実測時間をリング
-    バッファに保持し、直近 n% の平均値または中央値から ETA を再計算する。
-    """
-
     def __init__(self, *args, **kwargs):
         self._step_times: deque[float] = deque()
         self._last_update_at: float | None = None
-        # 解釈終了時（__del__ 経由の display）にモジュールグローバルが None 化されても
-        # 壊れないよう、統計関数をインスタンス属性として束縛しておく
         self._median = statistics.median
         self._mean = statistics.mean
         super().__init__(*args, **kwargs)
@@ -85,15 +72,12 @@ class RecentWindowTqdm(_base_tqdm):
 
 
 def patch_progress_bar() -> None:
-    """HF Trainer の ProgressCallback が使う tqdm を RecentWindowTqdm に差し替え"""
     import transformers.trainer_callback as trainer_callback
-
     trainer_callback.tqdm = RecentWindowTqdm
     logger.info("progress_bar_patched", window_fraction=ETA_WINDOW_FRACTION, use_median=ETA_USE_MEDIAN)
 
 
 def setup_logging() -> None:
-    """ターミナルには色付きで見やすい表示、ファイルには構造化ログ（JSON）を出力"""
     os.makedirs("logs", exist_ok=True)
     logger.remove()
     logger.configure(extra={"trace_id": "system"})
@@ -127,13 +111,11 @@ def setup_logging() -> None:
 
 
 def generate_trace_id() -> str:
-    """リクエスト単位の一意な trace_id を生成"""
     return uuid.uuid4().hex[:16]
 
 
 @contextmanager
 def trace_context(trace_id: str, operation: str):
-    """処理単位のコンテキスト管理"""
     with logger.contextualize(trace_id=trace_id, operation=operation):
         logger.info("start")
         try:
@@ -145,14 +127,12 @@ def trace_context(trace_id: str, operation: str):
 
 
 def handle_failure(operation: str, exc: Exception, trace_id: str, **context) -> None:
-    """統一例外処理"""
     logger.bind(trace_id=trace_id, operation=operation, **context).exception(
         f"failure in {operation}: {type(exc).__name__}: {exc}"
     )
 
 
 def get_gpu_telemetry() -> str:
-    """nvidia-smi から GPU メトリクスを取得"""
     try:
         out = subprocess.run(
             [
@@ -171,8 +151,6 @@ def get_gpu_telemetry() -> str:
 
 
 class TelemetryCallback(TrainerCallback):
-    """VRAM / RAM / GPU 状態をログ出力 + 定期 VRAM デフラグ"""
-
     def __init__(self, interval: int = 10, defrag_interval: int = 500):
         self.interval = interval
         self.defrag_interval = defrag_interval
@@ -181,7 +159,6 @@ class TelemetryCallback(TrainerCallback):
         if state.global_step % self.interval != 0:
             return
 
-        # 長時間稼働時の VRAM 断片化を定期的に解消（500 step ごと）
         if state.global_step > 0 and state.global_step % self.defrag_interval == 0:
             torch.cuda.empty_cache()
             logger.info("vram_defrag", step=state.global_step)
@@ -201,16 +178,13 @@ class TelemetryCallback(TrainerCallback):
 
 
 def check_gpu_availability() -> None:
-    """GPU 利用可能性を確認"""
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "CUDA GPU not found. This script requires an NVIDIA GPU for training. "
-            "Check: 1) `nvidia-smi` works, 2) PyTorch CUDA build is installed."
+            "CUDA GPU not found. This script requires an NVIDIA GPU for training."
         )
 
 
 def load_model_and_tokenizer(trace_id: str):
-    """モデルとトークナイザを読み込み（Unsloth ネイティブロード）"""
     with trace_context(trace_id, "load_model_and_tokenizer"):
         model, tokenizer = FastLanguageModel.from_pretrained(
             MODEL_ID,
@@ -223,7 +197,6 @@ def load_model_and_tokenizer(trace_id: str):
 
 
 def prepare_tokenizer(model, tokenizer, trace_id: str):
-    """トークナイザの設定と特殊トークン追加"""
     with trace_context(trace_id, "prepare_tokenizer"):
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
@@ -243,13 +216,13 @@ def prepare_tokenizer(model, tokenizer, trace_id: str):
 
 
 def setup_peft_model(model, trace_id: str):
-    """PEFT/LoRA モデルの設定（Unsloth 最適化 Gradient Checkpointing 適用）"""
     with trace_context(trace_id, "setup_peft_model"):
         model = FastLanguageModel.get_peft_model(
             model,
             r=8,
             lora_alpha=16,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            modules_to_save=["embed_tokens", "lm_head"],
             lora_dropout=0,
             bias="none",
             use_gradient_checkpointing="unsloth",
@@ -261,7 +234,6 @@ def setup_peft_model(model, trace_id: str):
 
 
 def load_dataset_mmap(trace_id: str):
-    """Memory-mapped Arrow データセットとして読み込み"""
     with trace_context(trace_id, "load_dataset_mmap"):
         dataset = load_dataset("json", data_files=DATA_PATH, split="train")
         logger.info("dataset_mmap_ready", total_samples=len(dataset))
@@ -269,7 +241,6 @@ def load_dataset_mmap(trace_id: str):
 
 
 def split_dataset_mmap(dataset, trace_id: str, eval_size: int = 500):
-    """train/eval 分割"""
     with trace_context(trace_id, "split_dataset_mmap"):
         train_size = len(dataset) - eval_size
         train_dataset = dataset.select(range(train_size))
@@ -279,7 +250,6 @@ def split_dataset_mmap(dataset, trace_id: str, eval_size: int = 500):
 
 
 def build_training_args():
-    """SFTConfig 構築（Unsloth ネイティブ設定）"""
     return SFTConfig(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=1,
@@ -307,7 +277,6 @@ def build_training_args():
 
 
 def cleanup_temp_cache() -> None:
-    """学習終了・失敗時に一時データセットキャッシュ領域を全消去」"""
     if os.path.exists(TEMP_CACHE_DIR):
         try:
             shutil.rmtree(TEMP_CACHE_DIR, ignore_errors=True)
@@ -317,7 +286,6 @@ def cleanup_temp_cache() -> None:
 
 
 def main() -> None:
-    """メイン処理"""
     trace_id = generate_trace_id()
     setup_logging()
 
@@ -350,7 +318,6 @@ def main() -> None:
         )
 
         with trace_context(trace_id, "training"):
-            # チェックポイントの検索（途中中断からの自動復帰機能）
             checkpoint = None
             if os.path.exists(OUTPUT_DIR):
                 checkpoints = [
@@ -359,7 +326,6 @@ def main() -> None:
                     if d.startswith("checkpoint-") and os.path.isdir(os.path.join(OUTPUT_DIR, d))
                 ]
                 if checkpoints:
-                    # ステップ数が最も大きい最新のチェックポイントを選択
                     checkpoint = max(checkpoints, key=lambda x: int(x.split("-")[-1]))
                     logger.info("resuming_from_checkpoint", checkpoint=checkpoint)
 
@@ -369,6 +335,11 @@ def main() -> None:
             model.save_pretrained(OUTPUT_DIR)
             tokenizer.save_pretrained(OUTPUT_DIR)
             logger.info("model_saved", output_dir=OUTPUT_DIR)
+
+        # Unsloth 推奨: マージ済みモデルの自動保存 (16-bit / 4-bit merged)
+        with trace_context(trace_id, "save_pretrained_merged"):
+            model.save_pretrained_merged(MERGED_OUTPUT_DIR, tokenizer, save_method="merged_16bit")
+            logger.info("merged_model_saved", output_dir=MERGED_OUTPUT_DIR)
 
     except Exception as exc:
         handle_failure("main", exc, trace_id)
