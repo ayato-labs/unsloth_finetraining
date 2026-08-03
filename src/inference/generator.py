@@ -1,0 +1,52 @@
+import os
+import sys
+import torch
+from peft import PeftModel
+from transformers import AutoTokenizer
+from unsloth import FastLanguageModel
+
+from src.common.config import DEFAULT_BASE_MODEL, DEFAULT_CHECKPOINT_DIR, DEFAULT_MERGED_DIR, MAX_SEQ_LENGTH
+from src.common.logger import logger, trace_context
+
+
+def load_inference_model(checkpoint_path: str, is_merged: bool = False):
+    if is_merged:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=checkpoint_path,
+            max_seq_length=MAX_SEQ_LENGTH,
+            dtype=None,
+            load_in_4bit=True,
+        )
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+        base_model, _ = FastLanguageModel.from_pretrained(
+            model_name=DEFAULT_BASE_MODEL,
+            max_seq_length=MAX_SEQ_LENGTH,
+            dtype=None,
+            load_in_4bit=True,
+        )
+        model = PeftModel.from_pretrained(base_model, checkpoint_path)
+
+    FastLanguageModel.for_inference(model)
+    return model, tokenizer
+
+
+def generate_text(model, tokenizer, prompt: str, max_new_tokens: int = 256, temperature: float = 0.7) -> str:
+    messages = [{"role": "user", "content": prompt}]
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    ).to("cuda")
+
+    with torch.no_grad():
+        outputs = model.generate(
+            input_ids=inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            use_cache=True,
+        )
+
+    response = tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
+    return response
