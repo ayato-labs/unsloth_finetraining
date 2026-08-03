@@ -272,6 +272,7 @@ def build_training_args():
         dataset_text_field="text",
         max_seq_length=MAX_SEQ_LENGTH,
         dataset_num_proc=os.cpu_count() or 4,
+        packing=True,
     )
 
 
