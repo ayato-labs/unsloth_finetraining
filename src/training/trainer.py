@@ -66,6 +66,7 @@ def build_training_args(max_steps: int = -1):
         max_grad_norm=0.3,
         max_seq_length=MAX_SEQ_LENGTH,
         packing=True,
+        ignore_data_skip=True,
         dataset_num_proc=os.cpu_count() or 4,
     )
 
