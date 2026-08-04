@@ -56,17 +56,15 @@ def build_training_args():
         save_steps=200,
         save_total_limit=2,
         load_best_model_at_end=False,
-        warmup_ratio=0.03,
+        warmup_steps=50,
         lr_scheduler_type="cosine",
         optim="adamw_8bit",
         report_to="none",
         remove_unused_columns=False,
         gradient_checkpointing=True,
         max_grad_norm=0.3,
-        dataset_text_field="text",
         max_seq_length=MAX_SEQ_LENGTH,
         dataset_num_proc=os.cpu_count() or 4,
-        packing=True,
     )
 
 

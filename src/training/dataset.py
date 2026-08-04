@@ -19,7 +19,12 @@ def init_tokenizer_worker(tok, eos_token):
 def tokenize_text_worker(text: str) -> dict:
     if not text.endswith(_WORKER_EOS_TOKEN):
         text += _WORKER_EOS_TOKEN
-    return {"input_ids": _WORKER_TOKENIZER(text)["input_ids"]}
+    tok = _WORKER_TOKENIZER(text)
+    return {
+        "input_ids": tok["input_ids"],
+        "attention_mask": tok.get("attention_mask", [1] * len(tok["input_ids"])),
+        "token_type_ids": tok.get("token_type_ids", [0] * len(tok["input_ids"])),
+    }
 
 
 def iter_tokenized_window(dataset, tok, num_workers: int, window_size: int = TOKENIZE_WINDOW_SIZE) -> Iterator[dict]:
@@ -56,7 +61,11 @@ def split_dataset_mmap(dataset, tokenizer, trace_id: str):
         raw_eval = dataset.select(range(train_size, total_samples))
 
         num_workers = max(1, (os.cpu_count() or 4) // 2)
-        features = Features({"input_ids": Sequence(Value("int32"))})
+        features = Features({
+            "input_ids": Sequence(Value("int32")),
+            "attention_mask": Sequence(Value("int32")),
+            "token_type_ids": Sequence(Value("int32")),
+        })
 
         train_iterable = IterableDataset.from_generator(
             iter_tokenized_window,
