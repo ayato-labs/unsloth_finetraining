@@ -3,7 +3,7 @@ import sys
 
 from unsloth import FastLanguageModel  # noqa: I001 - must be imported before transformers/peft
 
-from src.common.config import MERGED_OUTPUT_DIR, OUTPUT_DIR, VERSION
+from src.common.config import EVAL_SIZE, GRADIENT_ACCUM_STEPS, MERGED_OUTPUT_DIR, OUTPUT_DIR, TRAIN_BATCH_SIZE, VERSION
 from src.common.logger import generate_trace_id, handle_failure, logger, setup_logging, trace_context
 from src.common.telemetry import check_gpu_availability
 from src.training.dataset import load_dataset_mmap, split_dataset_mmap
@@ -22,9 +22,12 @@ def main() -> None:
         model = setup_peft_model(model, trace_id)
 
         dataset = load_dataset_mmap(trace_id)
+        train_samples = max(1, len(dataset) - EVAL_SIZE)
         train_dataset, eval_dataset = split_dataset_mmap(dataset, tokenizer, trace_id)
 
-        training_args = build_training_args()
+        max_steps = max(1, train_samples // (TRAIN_BATCH_SIZE * GRADIENT_ACCUM_STEPS))
+
+        training_args = build_training_args(max_steps=max_steps)
         trainer = setup_trainer(model, tokenizer, train_dataset, eval_dataset, training_args, trace_id)
 
         with trace_context(trace_id, "train"):

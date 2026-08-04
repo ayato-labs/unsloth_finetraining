@@ -42,17 +42,17 @@ class RecentWindowTqdm(_base_tqdm):
         return d
 
 
-def build_training_args():
+def build_training_args(max_steps: int = -1):
     return SFTConfig(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=TRAIN_BATCH_SIZE,
         per_device_eval_batch_size=EVAL_BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUM_STEPS,
-        num_train_epochs=1,
+        max_steps=max_steps,
         learning_rate=2e-4,
         bf16=True,
         logging_steps=10,
-        eval_strategy="epoch",
+        eval_strategy="no",
         save_steps=200,
         save_total_limit=2,
         load_best_model_at_end=False,
