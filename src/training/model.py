@@ -1,18 +1,19 @@
 from unsloth import FastLanguageModel
 
-from src.common.config import MODEL_ID, MAX_SEQ_LENGTH
+from src.common.config import DEFAULT_BASE_MODEL, MAX_SEQ_LENGTH
 from src.common.logger import logger, trace_context
 
 
 def load_base_model(trace_id: str):
     with trace_context(trace_id, "load_base_model"):
         model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=MODEL_ID,
+            model_name=DEFAULT_BASE_MODEL,
             max_seq_length=MAX_SEQ_LENGTH,
             dtype=None,
             load_in_4bit=True,
         )
-        logger.info("model_loaded", model_id=MODEL_ID, max_seq_length=MAX_SEQ_LENGTH)
+        model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
+        logger.info("model_loaded", model_id=DEFAULT_BASE_MODEL, max_seq_length=MAX_SEQ_LENGTH)
         return model, tokenizer
 
 

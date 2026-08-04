@@ -20,11 +20,11 @@ from src.common.telemetry import TelemetryCallback
 
 class RecentWindowTqdm(_base_tqdm):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        total = kwargs.get("total") or getattr(self, "total", None) or 1
+        total = kwargs.get("total") or 1
         self._window_size = max(5, int(total * ETA_WINDOW_FRACTION))
         self._step_times = deque(maxlen=self._window_size)
         self._last_n = 0
+        super().__init__(*args, **kwargs)
 
     def update(self, n=1):
         now = self._time()
@@ -33,9 +33,10 @@ class RecentWindowTqdm(_base_tqdm):
             self._step_times.append(delta_t / n)
         super().update(n)
 
+    @property
     def format_dict(self):
-        d = super().format_dict()
-        if len(self._step_times) >= 2:
+        d = super().format_dict
+        if hasattr(self, "_step_times") and len(self._step_times) >= 2:
             avg_step_time = statistics.mean(self._step_times)
             if avg_step_time > 0:
                 d["rate"] = 1.0 / avg_step_time
@@ -64,6 +65,7 @@ def build_training_args(max_steps: int = -1):
         gradient_checkpointing=True,
         max_grad_norm=0.3,
         max_seq_length=MAX_SEQ_LENGTH,
+        packing=True,
         dataset_num_proc=os.cpu_count() or 4,
     )
 
