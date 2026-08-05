@@ -7,6 +7,7 @@ from unsloth import FastLanguageModel
 
 from src.common.config import DEFAULT_BASE_MODEL, DEFAULT_CHECKPOINT_DIR, DEFAULT_MERGED_DIR, MAX_SEQ_LENGTH
 from src.common.logger import logger, trace_context
+from src.common.model_utils import align_model_embeddings
 
 
 def load_inference_model(checkpoint_path: str, is_merged: bool = False):
@@ -25,6 +26,7 @@ def load_inference_model(checkpoint_path: str, is_merged: bool = False):
             dtype=None,
             load_in_4bit=True,
         )
+        align_model_embeddings(base_model, tokenizer)
         model = PeftModel.from_pretrained(base_model, checkpoint_path)
 
     FastLanguageModel.for_inference(model)

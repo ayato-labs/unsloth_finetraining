@@ -2,6 +2,7 @@ from unsloth import FastLanguageModel
 
 from src.common.config import DEFAULT_BASE_MODEL, MAX_SEQ_LENGTH
 from src.common.logger import logger, trace_context
+from src.common.model_utils import align_model_embeddings
 
 
 def load_base_model(trace_id: str):
@@ -12,7 +13,7 @@ def load_base_model(trace_id: str):
             dtype=None,
             load_in_4bit=True,
         )
-        model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
+        align_model_embeddings(model, tokenizer)
         logger.info("model_loaded", model_id=DEFAULT_BASE_MODEL, max_seq_length=MAX_SEQ_LENGTH)
         return model, tokenizer
 
