@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--interactive", action="store_true", help="Interactive prompt mode")
     parser.add_argument("--max_tokens", type=int, default=256, help="Maximum new tokens")
     parser.add_argument("--temp", type=float, default=0.7, help="Generation temperature")
+    parser.add_argument("--repetition_penalty", type=float, default=1.2, help="Repetition penalty to prevent text loop")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top-p sampling parameter")
     args = parser.parse_args()
 
     trace_id = generate_trace_id()
@@ -52,11 +54,27 @@ def main():
                 prompt = input("Prompt > ")
                 if prompt.strip().lower() == "exit":
                     break
-                response = generate_text(model, tokenizer, prompt, max_new_tokens=args.max_tokens, temperature=args.temp)
+                response = generate_text(
+                    model,
+                    tokenizer,
+                    prompt,
+                    max_new_tokens=args.max_tokens,
+                    temperature=args.temp,
+                    repetition_penalty=args.repetition_penalty,
+                    top_p=args.top_p,
+                )
                 print(f"\nResponse:\n{response}\n")
         elif args.prompt:
             with trace_context(trace_id, "generate"):
-                response = generate_text(model, tokenizer, args.prompt, max_new_tokens=args.max_tokens, temperature=args.temp)
+                response = generate_text(
+                    model,
+                    tokenizer,
+                    args.prompt,
+                    max_new_tokens=args.max_tokens,
+                    temperature=args.temp,
+                    repetition_penalty=args.repetition_penalty,
+                    top_p=args.top_p,
+                )
                 print(f"\nResponse:\n{response}\n")
         else:
             parser.print_help()

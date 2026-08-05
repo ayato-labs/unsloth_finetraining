@@ -33,7 +33,15 @@ def load_inference_model(checkpoint_path: str, is_merged: bool = False):
     return model, tokenizer
 
 
-def generate_text(model, tokenizer, prompt: str, max_new_tokens: int = 256, temperature: float = 0.7) -> str:
+def generate_text(
+    model,
+    tokenizer,
+    prompt: str,
+    max_new_tokens: int = 256,
+    temperature: float = 0.7,
+    repetition_penalty: float = 1.2,
+    top_p: float = 0.9,
+) -> str:
     messages = [{"role": "user", "content": prompt}]
     inputs = tokenizer.apply_chat_template(
         messages,
@@ -48,6 +56,9 @@ def generate_text(model, tokenizer, prompt: str, max_new_tokens: int = 256, temp
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            top_p=top_p,
+            do_sample=temperature > 0.0,
             use_cache=True,
         )
 
