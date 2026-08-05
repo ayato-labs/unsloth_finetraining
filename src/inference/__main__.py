@@ -2,7 +2,7 @@
 # uv run --no-sync python -m src.inference --checkpoint gemma3-finetuned/checkpoint-16400 --prompt "こんにちは、自己紹介をしてください。"
 
 # 対話モード
-# python -m src.inference --checkpoint gemma3-finetuned/checkpoint-16400 --interactive
+# uv run --no-sync python -m src.inference --checkpoint gemma3-finetuned/checkpoint-16400 --interactive
 
 import argparse
 import os
